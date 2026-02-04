@@ -6,4 +6,10 @@ authors = ["Takahiro <hogehoge@gachapin.jp>"]
 [dependencies]
 gl = {git = "https://github.com/bjz/gl-rs"}
 nes_rust = {path = "../"}
-sdl2 = "0.32"
+sdl2 = "0.35"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

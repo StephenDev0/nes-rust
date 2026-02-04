@@ -1,5 +1,6 @@
 use memory::Memory;
 use mapper::{Mapper, MapperFactory};
+use save_state::MapperState;
 
 pub struct Rom {
 	header: RomHeader,
@@ -13,18 +14,26 @@ pub enum Mirrorings {
 	SingleScreen,
 	Horizontal,
 	Vertical,
-	FourScreen
+	FourScreen,
+    OneScreenLow,
+    OneScreenHigh,
 }
 
 impl Rom {
-	pub fn new(data: Vec<u8>) -> Self {
+	pub fn new(data: Vec<u8>) -> Option<Self> {
+        if data.len() < HEADER_SIZE {
+            return None;
+        }
 		let header = RomHeader::new(data[0..HEADER_SIZE].to_vec());
-		let mapper = MapperFactory::create(&header);
-		Rom {
+		let mapper = match MapperFactory::create(&header) {
+            Some(m) => m,
+            None => return None,
+        };
+		Some(Rom {
 			header: header,
 			memory: Memory::new(data[HEADER_SIZE..].to_vec()),
 			mapper: mapper
-		}
+		})
 	}
 
 	/**
@@ -77,6 +86,16 @@ impl Rom {
 	// @TODO: MMC3Mapper specific. Should this method be here?
 	pub fn irq_interrupted(&mut self) -> bool {
 		self.mapper.drive_irq_counter()
+	}
+
+	/// Save mapper state
+	pub fn save_mapper_state(&self) -> MapperState {
+		self.mapper.save_state()
+	}
+
+	/// Load mapper state
+	pub fn load_mapper_state(&mut self, state: &MapperState) {
+		self.mapper.load_state(state);
 	}
 }
 

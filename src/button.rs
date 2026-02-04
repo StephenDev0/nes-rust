@@ -14,7 +14,11 @@ pub enum Button {
 	Joypad2Up,
 	Joypad2Down,
 	Joypad2Left,
-	Joypad2Right
+	Joypad2Right,
+    X,
+    Y,
+    L,
+    R,
 }
 
 pub enum Event {

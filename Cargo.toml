@@ -15,10 +15,28 @@ exclude = [
 ]
 
 [lib]
-crate-type = ["rlib", "staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib"]
 
 [workspace]
 members = [".", "cli", "wasm"]
+
+[dependencies]
+lazy_static = "1.4"
+sdl2 = { version = "0.35", default-features = false, features = ["use_mac_framework"] }
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+dust-core = { git = "https://github.com/kelpsyberry/dust", package = "dust-core" }
+dust-soft-2d = { git = "https://github.com/kelpsyberry/dust", package = "dust-soft-2d" }
+dust-soft-3d = { git = "https://github.com/kelpsyberry/dust", package = "dust-soft-3d" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.release.package."*"]
+opt-level = 3
 
 [badges]
 travis-ci = {repository = "takahirox/nes-rust"}

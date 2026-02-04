@@ -3,6 +3,7 @@ use memory::Memory;
 use rom::Rom;
 use rom::Mirrorings;
 use display::Display;
+use save_state::PpuState;
 
 /**
  * RP2A03
@@ -256,6 +257,7 @@ impl Ppu {
 		self.cycle = 0;
 	}
 
+	#[inline]
 	pub fn step(&mut self, rom: &mut Rom) {
 		self.render_pixel(rom);
 		self.shift_registers();
@@ -432,6 +434,7 @@ impl Ppu {
 		}
 	}
 
+	#[inline]
 	fn load(&self, mut address: u16, rom: &Rom) -> u8 {
 		address = address & 0x3FFF;  // just in case
 
@@ -485,6 +488,7 @@ impl Ppu {
 		}
 	}
 
+	#[inline]
 	fn render_pixel(&mut self, rom: &Rom) {
 		// Note: this comparison order is for performance.
 		if self.cycle >= 257 || self.scanline >= 240 || self.cycle == 0 {
@@ -547,6 +551,7 @@ impl Ppu {
 		self.display.render_pixel(x, y, c);
 	}
 
+	#[inline(always)]
 	fn get_background_palette_address(&self) -> u16 {
 		// fine_x_scroll selects 16-bit shifts register.
 		let pos = 15 - (self.fine_x_scroll & 0xF);
@@ -560,6 +565,7 @@ impl Ppu {
 		0x3F00 + offset as u16
 	}
 
+	#[inline(always)]
 	fn shift_registers(&mut self) {
 		if self.scanline >= 240 && self.scanline <= 260 {
 			return;
@@ -574,6 +580,7 @@ impl Ppu {
 		}
 	}
 
+	#[inline]
 	fn fetch(&mut self, rom: &Rom) {
 		// No fetch during post-rendering scanline 240 and vblank interval 241-260
 		if self.scanline >= 240 && self.scanline <= 260 {
@@ -732,6 +739,7 @@ impl Ppu {
 		self.pattern_table_high_latch = self.load(index + 0x8, rom);
 	}
 
+	#[inline]
 	fn update_flags(&mut self, rom: &mut Rom) {
 		if self.cycle == 1 {
 			if self.scanline == 241 {
@@ -796,6 +804,7 @@ impl Ppu {
 		}
 	}
 
+	#[inline]
 	fn countup_scroll_counters(&mut self) {
 		if !self.ppumask.is_background_visible() && !self.ppumask.is_sprites_visible() {
 			return;
@@ -865,6 +874,7 @@ impl Ppu {
 		}
 	}
 
+	#[inline(always)]
 	fn countup_cycle(&mut self) {
 		// cycle:    0 - 340
 		// scanline: 0 - 261
@@ -889,9 +899,9 @@ impl Ppu {
 		self.ppuaddr.store(self.current_vram_address as u8 & 0xFF);
 	}
 
+	#[inline]
 	fn evaluate_sprites(&mut self, rom: &Rom) {
 		// oamaddr is set to 0 during cycle 257-320 of the pre-render and visible scanlines.
-		// @TODO: Optimize
 		if (self.scanline < 240 || self.scanline == 261) &&
 			self.cycle >= 257 && self.cycle <= 320 {
 			self.oamaddr.store(0);
@@ -921,10 +931,10 @@ impl Ppu {
 		}
 	}
 
+	#[inline]
 	fn process_sprite_pixels(&mut self, rom: &Rom) {
-		for i in 0..self.sprite_availables.len() {
-			self.sprite_availables[i] = false;
-		}
+		// Clear sprite availability using fast memset
+		self.sprite_availables = [false; 256];
 
 		let y = self.scanline as u8;
 		let height = self.ppuctrl.sprite_height();
@@ -981,6 +991,8 @@ impl Ppu {
 		let name_table_address = address & 0x2C00;
 		(address & 0x3FF) | match rom.mirroring_type() {
 			Mirrorings::SingleScreen => 0x2000,
+            Mirrorings::OneScreenLow => 0x2000,
+            Mirrorings::OneScreenHigh => 0x2400,
 			Mirrorings::Horizontal => match name_table_address {
 				0x2000 => 0x2000,
 				0x2400 => 0x2000,
@@ -1036,6 +1048,7 @@ impl Ppu {
 		(((higher_bits >> pos) & 1) << 1) | ((lower_bits >> pos) & 1)
 	}
 
+	#[inline(always)]
 	fn load_palette(&self, address: u8) -> u32 {
 		// In greyscale mode, mask the palette index with 0x30 and
 		// read from the grey column 0x00, 0x10, 0x20, or 0x30
@@ -1064,6 +1077,74 @@ impl Ppu {
 	pub fn get_display(&self) -> &Box<dyn Display> {
 		&self.display
 	}
+
+	/// Save PPU state
+	pub fn save_state(&self) -> PpuState {
+		PpuState {
+			frame: self.frame,
+			cycle: self.cycle,
+			scanline: self.scanline,
+			suppress_vblank: self.suppress_vblank,
+			register_first_store: self.register_first_store,
+			fine_x_scroll: self.fine_x_scroll,
+			name_table_latch: self.name_table_latch,
+			name_table: self.name_table.get_data(),
+			pattern_table_low_latch: self.pattern_table_low_latch,
+			pattern_table_high_latch: self.pattern_table_high_latch,
+			pattern_table_low: self.pattern_table_low.get_data(),
+			pattern_table_high: self.pattern_table_high.get_data(),
+			attribute_table_low_latch: self.attribute_table_low_latch,
+			attribute_table_high_latch: self.attribute_table_high_latch,
+			attribute_table_low: self.attribute_table_low.get_data(),
+			attribute_table_high: self.attribute_table_high.get_data(),
+			current_vram_address: self.current_vram_address,
+			temporal_vram_address: self.temporal_vram_address,
+			vram_read_buffer: self.vram_read_buffer,
+			vram: self.vram.get_data(),
+			primary_oam: self.primary_oam.memory.get_data(),
+			secondary_oam: self.secondary_oam.memory.get_data(),
+			oamaddr: self.oamaddr.get_data(),
+			ppuctrl: self.ppuctrl.register.get_data(),
+			ppumask: self.ppumask.register.get_data(),
+			ppustatus: self.ppustatus.register.get_data(),
+			data_bus: self.data_bus,
+			nmi_interrupted: self.nmi_interrupted,
+			irq_interrupted: self.irq_interrupted,
+		}
+	}
+
+	/// Load PPU state
+	pub fn load_state(&mut self, state: &PpuState) {
+		self.frame = state.frame;
+		self.cycle = state.cycle;
+		self.scanline = state.scanline;
+		self.suppress_vblank = state.suppress_vblank;
+		self.register_first_store = state.register_first_store;
+		self.fine_x_scroll = state.fine_x_scroll;
+		self.name_table_latch = state.name_table_latch;
+		self.name_table.set_data(state.name_table);
+		self.pattern_table_low_latch = state.pattern_table_low_latch;
+		self.pattern_table_high_latch = state.pattern_table_high_latch;
+		self.pattern_table_low.set_data(state.pattern_table_low);
+		self.pattern_table_high.set_data(state.pattern_table_high);
+		self.attribute_table_low_latch = state.attribute_table_low_latch;
+		self.attribute_table_high_latch = state.attribute_table_high_latch;
+		self.attribute_table_low.set_data(state.attribute_table_low);
+		self.attribute_table_high.set_data(state.attribute_table_high);
+		self.current_vram_address = state.current_vram_address;
+		self.temporal_vram_address = state.temporal_vram_address;
+		self.vram_read_buffer = state.vram_read_buffer;
+		self.vram.set_data(&state.vram);
+		self.primary_oam.memory.set_data(&state.primary_oam);
+		self.secondary_oam.memory.set_data(&state.secondary_oam);
+		self.oamaddr.set_data(state.oamaddr);
+		self.ppuctrl.register.set_data(state.ppuctrl);
+		self.ppumask.register.set_data(state.ppumask);
+		self.ppustatus.register.set_data(state.ppustatus);
+		self.data_bus = state.data_bus;
+		self.nmi_interrupted = state.nmi_interrupted;
+		self.irq_interrupted = state.irq_interrupted;
+	}
 }
 
 // PPU control 8-bit register.
@@ -1071,7 +1152,7 @@ impl Ppu {
 // Write-only
 
 pub struct PpuControlRegister {
-	register: Register<u8>
+	pub register: Register<u8>
 }
 
 impl PpuControlRegister {
@@ -1151,7 +1232,7 @@ impl PpuControlRegister {
 // CPU memory-mapped at 0x2001
 // Write-only
 pub struct PpuMaskRegister {
-	register: Register<u8>
+	pub register: Register<u8>
 }
 
 impl PpuMaskRegister {
@@ -1219,7 +1300,7 @@ impl PpuMaskRegister {
 // CPU memory-mapped at 0x2002
 // Read-only
 pub struct PpuStatusRegister {
-	register: Register<u8>
+	pub register: Register<u8>
 }
 
 impl PpuStatusRegister {
@@ -1278,7 +1359,7 @@ impl PpuStatusRegister {
 }
 
 pub struct SpritesManager {
-	memory: Memory
+	pub memory: Memory
 }
 
 impl SpritesManager {

@@ -19,15 +19,13 @@ impl DefaultDisplay {
 }
 
 impl Display for DefaultDisplay {
+	#[inline(always)]
 	fn render_pixel(&mut self, x: u16, y: u16, c: u32) {
-		let r = ((c >> 16) & 0xff) as u8;
-		let g = ((c >> 8) & 0xff) as u8;
-		let b = (c & 0xff) as u8;
-		let base_index = (y as u32 * SCREEN_WIDTH + x as u32) * PIXEL_BYTES;
-		// Is this memory layout, BGR, correct?
-		self.pixels[(base_index + 2) as usize] = r;
-		self.pixels[(base_index + 1) as usize] = g;
-		self.pixels[(base_index + 0) as usize] = b;
+		let base_index = ((y as usize) * (SCREEN_WIDTH as usize) + (x as usize)) * (PIXEL_BYTES as usize);
+		// Write BGR directly without separate extractions
+		self.pixels[base_index] = c as u8;
+		self.pixels[base_index + 1] = (c >> 8) as u8;
+		self.pixels[base_index + 2] = (c >> 16) as u8;
 	}
 
 	fn vblank(&mut self) {

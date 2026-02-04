@@ -1,5 +1,6 @@
 use button;
 use register::Register;
+use save_state::JoypadState;
 
 const BUTTON_NUM: u8 = 8;
 
@@ -82,5 +83,23 @@ impl Joypad {
 
 	pub fn release_button(&mut self, button: Button) {
 		self.buttons[button_index(button)] = false;
+	}
+
+	/// Save joypad state
+	pub fn save_state(&self) -> JoypadState {
+		JoypadState {
+			register: self.register.get_data(),
+			latch: self.latch,
+			current_button: self.current_button,
+			buttons: self.buttons,
+		}
+	}
+
+	/// Load joypad state
+	pub fn load_state(&mut self, state: &JoypadState) {
+		self.register.set_data(state.register);
+		self.latch = state.latch;
+		self.current_button = state.current_button;
+		self.buttons = state.buttons;
 	}
 }

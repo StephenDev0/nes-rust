@@ -1,3 +1,9 @@
+extern crate sdl2;
+#[macro_use]
+extern crate lazy_static;
+extern crate serde;
+extern crate bincode;
+
 pub mod register;
 pub mod cpu;
 pub mod ppu;
@@ -10,10 +16,13 @@ pub mod joypad;
 pub mod input;
 pub mod audio;
 pub mod display;
+pub mod ds;
 pub mod default_input;
 pub mod default_audio;
 pub mod default_display;
+pub mod sdl_backend;
 pub mod ffi;
+pub mod save_state;
 
 use cpu::Cpu;
 use rom::Rom;
@@ -21,9 +30,35 @@ use button::Button;
 use input::Input;
 use display::Display;
 use audio::Audio;
+use save_state::SaveState;
 
 pub struct Nes {
 	cpu: Cpu
+}
+
+impl Nes {
+	/// Save the current emulator state
+	pub fn save_state(&self) -> SaveState {
+		self.cpu.save_state()
+	}
+
+	/// Load a previously saved state
+	pub fn load_state(&mut self, state: &SaveState) {
+		self.cpu.load_state(state);
+	}
+
+	/// Save state to bytes
+	pub fn save_state_to_bytes(&self) -> Result<Vec<u8>, String> {
+		let state = self.save_state();
+		save_state::serialize(&state)
+	}
+
+	/// Load state from bytes
+	pub fn load_state_from_bytes(&mut self, data: &[u8]) -> Result<(), String> {
+		let state = save_state::deserialize(data)?;
+		self.load_state(&state);
+		Ok(())
+	}
 }
 
 impl Nes {

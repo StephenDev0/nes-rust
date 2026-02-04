@@ -2,16 +2,18 @@ pub struct MapperFactory;
 use rom::Mirrorings;
 use rom::RomHeader;
 use register::Register;
+use save_state::MapperState;
 
 impl MapperFactory {
-	pub fn create(header: &RomHeader) -> Box<dyn Mapper> {
+	pub fn create(header: &RomHeader) -> Option<Box<dyn Mapper>> {
 		match header.mapper_num() {
-			0 => Box::new(NRomMapper::new(header)),
-			1 => Box::new(MMC1Mapper::new(header)),
-			2 => Box::new(UNRomMapper::new(header)),
-			3 => Box::new(CNRomMapper::new()),
-			4 => Box::new(MMC3Mapper::new(header)),
-			_ => panic!("Unsupported mapper {}", header.mapper_num())
+			0 => Some(Box::new(NRomMapper::new(header))),
+			1 => Some(Box::new(MMC1Mapper::new(header))),
+			2 => Some(Box::new(UNRomMapper::new(header))),
+			3 => Some(Box::new(CNRomMapper::new())),
+			4 => Some(Box::new(MMC3Mapper::new(header))),
+            69 => Some(Box::new(SunsoftMapper::new(header))),
+			_ => None
 		}
 	}
 }
@@ -32,6 +34,12 @@ pub trait Mapper {
 
 	// @TODO: MMC3Mapper specific. Should this method be here?
 	fn drive_irq_counter(&mut self) -> bool;
+
+	// Save mapper state
+	fn save_state(&self) -> MapperState;
+
+	// Load mapper state
+	fn load_state(&mut self, state: &MapperState);
 }
 
 pub struct NRomMapper {
@@ -85,6 +93,18 @@ impl Mapper for NRomMapper {
 
 	fn drive_irq_counter(&mut self) -> bool {
 		false
+	}
+
+	fn save_state(&self) -> MapperState {
+		MapperState::NRom {
+			program_bank_num: self.program_bank_num,
+		}
+	}
+
+	fn load_state(&mut self, state: &MapperState) {
+		if let MapperState::NRom { program_bank_num } = state {
+			self.program_bank_num = *program_bank_num;
+		}
 	}
 }
 
@@ -202,6 +222,38 @@ impl Mapper for MMC1Mapper {
 	fn drive_irq_counter(&mut self) -> bool {
 		false
 	}
+
+	fn save_state(&self) -> MapperState {
+		MapperState::MMC1 {
+			program_bank_num: self.program_bank_num,
+			control_register: self.control_register.get_data(),
+			chr_bank0_register: self.chr_bank0_register.get_data(),
+			chr_bank1_register: self.chr_bank1_register.get_data(),
+			prg_bank_register: self.prg_bank_register.get_data(),
+			latch: self.latch.get_data(),
+			register_write_count: self.register_write_count,
+		}
+	}
+
+	fn load_state(&mut self, state: &MapperState) {
+		if let MapperState::MMC1 {
+			program_bank_num,
+			control_register,
+			chr_bank0_register,
+			chr_bank1_register,
+			prg_bank_register,
+			latch,
+			register_write_count,
+		} = state {
+			self.program_bank_num = *program_bank_num;
+			self.control_register.set_data(*control_register);
+			self.chr_bank0_register.set_data(*chr_bank0_register);
+			self.chr_bank1_register.set_data(*chr_bank1_register);
+			self.prg_bank_register.set_data(*prg_bank_register);
+			self.latch.set_data(*latch);
+			self.register_write_count = *register_write_count;
+		}
+	}
 }
 
 struct UNRomMapper {
@@ -247,6 +299,20 @@ impl Mapper for UNRomMapper {
 	fn drive_irq_counter(&mut self) -> bool {
 		false
 	}
+
+	fn save_state(&self) -> MapperState {
+		MapperState::UNRom {
+			program_bank_num: self.program_bank_num,
+			register: self.register.get_data(),
+		}
+	}
+
+	fn load_state(&mut self, state: &MapperState) {
+		if let MapperState::UNRom { program_bank_num, register } = state {
+			self.program_bank_num = *program_bank_num;
+			self.register.set_data(*register);
+		}
+	}
 }
 
 struct CNRomMapper {
@@ -284,6 +350,18 @@ impl Mapper for CNRomMapper {
 
 	fn drive_irq_counter(&mut self) -> bool {
 		false
+	}
+
+	fn save_state(&self) -> MapperState {
+		MapperState::CNRom {
+			register: self.register.get_data(),
+		}
+	}
+
+	fn load_state(&mut self, state: &MapperState) {
+		if let MapperState::CNRom { register } = state {
+			self.register.set_data(*register);
+		}
 	}
 }
 
@@ -464,6 +542,257 @@ impl Mapper for MMC3Mapper {
 			}
 		}
 	}
+
+	fn save_state(&self) -> MapperState {
+		MapperState::MMC3 {
+			program_bank_num: self.program_bank_num,
+			character_bank_num: self.character_bank_num,
+			register0: self.register0.get_data(),
+			register1: self.register1.get_data(),
+			register2: self.register2.get_data(),
+			register3: self.register3.get_data(),
+			register4: self.register4.get_data(),
+			register5: self.register5.get_data(),
+			register6: self.register6.get_data(),
+			register7: self.register7.get_data(),
+			program_register0: self.program_register0.get_data(),
+			program_register1: self.program_register1.get_data(),
+			character_register0: self.character_register0.get_data(),
+			character_register1: self.character_register1.get_data(),
+			character_register2: self.character_register2.get_data(),
+			character_register3: self.character_register3.get_data(),
+			character_register4: self.character_register4.get_data(),
+			character_register5: self.character_register5.get_data(),
+			irq_counter: self.irq_counter,
+			irq_counter_reload: self.irq_counter_reload,
+			irq_enabled: self.irq_enabled,
+		}
+	}
+
+	fn load_state(&mut self, state: &MapperState) {
+		if let MapperState::MMC3 {
+			program_bank_num,
+			character_bank_num,
+			register0,
+			register1,
+			register2,
+			register3,
+			register4,
+			register5,
+			register6,
+			register7,
+			program_register0,
+			program_register1,
+			character_register0,
+			character_register1,
+			character_register2,
+			character_register3,
+			character_register4,
+			character_register5,
+			irq_counter,
+			irq_counter_reload,
+			irq_enabled,
+		} = state {
+			self.program_bank_num = *program_bank_num;
+			self.character_bank_num = *character_bank_num;
+			self.register0.set_data(*register0);
+			self.register1.set_data(*register1);
+			self.register2.set_data(*register2);
+			self.register3.set_data(*register3);
+			self.register4.set_data(*register4);
+			self.register5.set_data(*register5);
+			self.register6.set_data(*register6);
+			self.register7.set_data(*register7);
+			self.program_register0.set_data(*program_register0);
+			self.program_register1.set_data(*program_register1);
+			self.character_register0.set_data(*character_register0);
+			self.character_register1.set_data(*character_register1);
+			self.character_register2.set_data(*character_register2);
+			self.character_register3.set_data(*character_register3);
+			self.character_register4.set_data(*character_register4);
+			self.character_register5.set_data(*character_register5);
+			self.irq_counter = *irq_counter;
+			self.irq_counter_reload = *irq_counter_reload;
+			self.irq_enabled = *irq_enabled;
+		}
+	}
+}
+
+
+struct SunsoftMapper {
+    command_register: Register<u8>,
+    parameter_register: Register<u8>,
+    chr_banks: [Register<u8>; 8],
+    prg_banks: [Register<u8>; 4],
+    irq_enabled: bool,
+    irq_counter_enabled: bool,
+    irq_counter: u16,
+    mirroring: u8,
+    prg_bank_mask: u32,
+    chr_bank_mask: u32,
+}
+
+impl SunsoftMapper {
+    fn new(header: &RomHeader) -> Self {
+        let prg_bank_num = header.prg_rom_bank_num() as u32 * 2; // 8KB banks
+        let chr_bank_num = header.chr_rom_bank_num() as u32 * 8; // 1KB banks
+
+        let mut m = SunsoftMapper {
+            command_register: Register::<u8>::new(),
+            parameter_register: Register::<u8>::new(),
+            chr_banks: [
+                Register::<u8>::new(), Register::<u8>::new(),
+                Register::<u8>::new(), Register::<u8>::new(),
+                Register::<u8>::new(), Register::<u8>::new(),
+                Register::<u8>::new(), Register::<u8>::new(),
+            ],
+            prg_banks: [
+                Register::<u8>::new(), Register::<u8>::new(),
+                Register::<u8>::new(), Register::<u8>::new(),
+            ],
+            irq_enabled: false,
+            irq_counter_enabled: false,
+            irq_counter: 0,
+            mirroring: 0,
+            prg_bank_mask: prg_bank_num.saturating_sub(1),
+            chr_bank_mask: chr_bank_num.saturating_sub(1),
+        };
+        // Defaults
+        m.prg_banks[3].store((prg_bank_num - 1) as u8); // Fixed last bank
+        m
+    }
+}
+
+impl Mapper for SunsoftMapper {
+    fn map(&self, address: u32) -> u32 {
+        let bank_idx = match address {
+            0x6000..=0x7FFF => 0,
+            0x8000..=0x9FFF => 1,
+            0xA000..=0xBFFF => 2,
+            0xC000..=0xDFFF => 3,
+            0xE000..=0xFFFF => return ((self.prg_bank_mask) * 0x2000) + (address & 0x1FFF),
+            _ => 0,
+        };
+        
+        let bank = self.prg_banks[bank_idx].load() as u32 & self.prg_bank_mask;
+        bank * 0x2000 + (address & 0x1FFF)
+    }
+
+    fn map_for_chr_rom(&self, address: u32) -> u32 {
+        let bank_idx = (address / 0x400) as usize;
+        if bank_idx < 8 {
+            let bank = self.chr_banks[bank_idx].load() as u32 & self.chr_bank_mask;
+            bank * 0x400 + (address & 0x3FF)
+        } else {
+            address
+        }
+    }
+
+    fn store(&mut self, address: u32, value: u8) {
+        match address {
+            0x8000..=0x9FFF => {
+                self.command_register.store(value & 0x0F);
+            }
+            0xA000..=0xBFFF => {
+                self.parameter_register.store(value);
+                let cmd = self.command_register.load();
+                match cmd {
+                    0..=7 => {
+                        self.chr_banks[cmd as usize].store(value);
+                    }
+                    8..=11 => {
+                        self.prg_banks[(cmd - 8) as usize].store(value);
+                    }
+                    12 => {
+                        self.mirroring = value & 0x03;
+                    }
+                    13 => {
+                        self.irq_enabled = (value & 0x80) != 0;
+                        self.irq_counter_enabled = (value & 0x01) != 0;
+                    }
+                    14 => {
+                        self.irq_counter = (self.irq_counter & 0xFF00) | (value as u16);
+                    }
+                    15 => {
+                        self.irq_counter = (self.irq_counter & 0x00FF) | ((value as u16) << 8);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn has_mirroring_type(&self) -> bool {
+        true
+    }
+
+    fn mirroring_type(&self) -> Mirrorings {
+        match self.mirroring {
+            0 => Mirrorings::Vertical,
+            1 => Mirrorings::Horizontal,
+            2 => Mirrorings::OneScreenLow, // OneScreen 0
+            3 => Mirrorings::OneScreenHigh, // OneScreen 1
+            _ => Mirrorings::Vertical,
+        }
+    }
+
+    fn drive_irq_counter(&mut self) -> bool {
+        if self.irq_counter_enabled {
+            self.irq_counter = self.irq_counter.wrapping_sub(1);
+            if self.irq_counter == 0xFFFF {
+                return self.irq_enabled;
+            }
+        }
+        false
+    }
+
+    fn save_state(&self) -> MapperState {
+        MapperState::Sunsoft {
+            command_register: self.command_register.get_data(),
+            parameter_register: self.parameter_register.get_data(),
+            chr_banks: [
+                self.chr_banks[0].get_data(), self.chr_banks[1].get_data(),
+                self.chr_banks[2].get_data(), self.chr_banks[3].get_data(),
+                self.chr_banks[4].get_data(), self.chr_banks[5].get_data(),
+                self.chr_banks[6].get_data(), self.chr_banks[7].get_data(),
+            ],
+            prg_banks: [
+                self.prg_banks[0].get_data(), self.prg_banks[1].get_data(),
+                self.prg_banks[2].get_data(), self.prg_banks[3].get_data(),
+            ],
+            irq_enabled: self.irq_enabled,
+            irq_counter_enabled: self.irq_counter_enabled,
+            irq_counter: self.irq_counter,
+            mirroring: self.mirroring,
+        }
+    }
+
+    fn load_state(&mut self, state: &MapperState) {
+        if let MapperState::Sunsoft {
+            command_register,
+            parameter_register,
+            chr_banks,
+            prg_banks,
+            irq_enabled,
+            irq_counter_enabled,
+            irq_counter,
+            mirroring,
+        } = state {
+            self.command_register.set_data(*command_register);
+            self.parameter_register.set_data(*parameter_register);
+            for (i, val) in chr_banks.iter().enumerate() {
+                self.chr_banks[i].set_data(*val);
+            }
+            for (i, val) in prg_banks.iter().enumerate() {
+                self.prg_banks[i].set_data(*val);
+            }
+            self.irq_enabled = *irq_enabled;
+            self.irq_counter_enabled = *irq_counter_enabled;
+            self.irq_counter = *irq_counter;
+            self.mirroring = *mirroring;
+        }
+    }
 }
 
 #[cfg(test)]

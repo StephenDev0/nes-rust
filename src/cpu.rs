@@ -9,6 +9,7 @@ use joypad::Joypad;
 use input::Input;
 use display::Display;
 use audio::Audio;
+use save_state::{SaveState, CpuState};
 
 fn to_joypad_button(button: button::Button) -> joypad::Button {
 	match button {
@@ -217,880 +218,398 @@ enum AddressingModes {
 	Relative
 }
 
+// Compact operation encoding: [instruction_type: u8, cycle: u8, addressing_mode: u8]
+// This avoids constructing Operation structs at runtime
 struct Operation {
 	instruction_type: InstructionTypes,
 	cycle: u8,
 	addressing_mode: AddressingModes
 }
 
-// @TODO: Replace with static array?
+// Static opcode lookup table for O(1) decoding
+// Format: (instruction_type, cycle, addressing_mode) encoded as bytes
+static OPCODE_TABLE: [(u8, u8, u8); 256] = [
+	// 0x00-0x0F
+	(12, 7, 7),  // 0x00 BRK Implied
+	(34, 6, 10), // 0x01 ORA IndexedIndirectX
+	(0, 1, 0),   // 0x02 INV
+	(0, 1, 0),   // 0x03 INV
+	(0, 1, 0),   // 0x04 INV
+	(34, 3, 4),  // 0x05 ORA ZeroPage
+	(3, 5, 4),   // 0x06 ASL ZeroPage
+	(0, 1, 0),   // 0x07 INV
+	(35, 3, 7),  // 0x08 PHP Implied
+	(34, 2, 0),  // 0x09 ORA Immediate
+	(3, 2, 8),   // 0x0A ASL Accumulator
+	(0, 1, 0),   // 0x0B INV
+	(0, 1, 0),   // 0x0C INV
+	(34, 4, 1),  // 0x0D ORA Absolute
+	(3, 6, 1),   // 0x0E ASL Absolute
+	(0, 1, 0),   // 0x0F INV
+	// 0x10-0x1F
+	(11, 2, 12), // 0x10 BPL Relative
+	(34, 5, 11), // 0x11 ORA IndexedIndirectY
+	(0, 1, 0),   // 0x12 INV
+	(0, 1, 0),   // 0x13 INV
+	(0, 1, 0),   // 0x14 INV
+	(34, 4, 5),  // 0x15 ORA IndexedZeroPageX
+	(3, 6, 5),   // 0x16 ASL IndexedZeroPageX
+	(0, 1, 0),   // 0x17 INV
+	(15, 2, 7),  // 0x18 CLC Implied
+	(34, 4, 3),  // 0x19 ORA IndexedAbsoluteY
+	(0, 1, 0),   // 0x1A INV
+	(0, 1, 0),   // 0x1B INV
+	(0, 1, 0),   // 0x1C INV
+	(34, 4, 2),  // 0x1D ORA IndexedAbsoluteX
+	(3, 7, 2),   // 0x1E ASL IndexedAbsoluteX
+	(0, 1, 0),   // 0x1F INV
+	// 0x20-0x2F
+	(28, 6, 1),  // 0x20 JSR Absolute
+	(2, 6, 10),  // 0x21 AND IndexedIndirectX
+	(0, 1, 0),   // 0x22 INV
+	(0, 1, 0),   // 0x23 INV
+	(10, 3, 4),  // 0x24 BIT ZeroPage
+	(2, 3, 4),   // 0x25 AND ZeroPage
+	(37, 5, 4),  // 0x26 ROL ZeroPage
+	(0, 1, 0),   // 0x27 INV
+	(36, 4, 7),  // 0x28 PLP Implied
+	(2, 2, 0),   // 0x29 AND Immediate
+	(37, 2, 8),  // 0x2A ROL Accumulator
+	(0, 1, 0),   // 0x2B INV
+	(10, 4, 1),  // 0x2C BIT Absolute
+	(2, 4, 1),   // 0x2D AND Absolute
+	(37, 6, 1),  // 0x2E ROL Absolute
+	(0, 1, 0),   // 0x2F INV
+	// 0x30-0x3F
+	(9, 2, 12),  // 0x30 BMI Relative
+	(2, 5, 11),  // 0x31 AND IndexedIndirectY
+	(0, 1, 0),   // 0x32 INV
+	(0, 1, 0),   // 0x33 INV
+	(0, 1, 0),   // 0x34 INV
+	(2, 4, 5),   // 0x35 AND IndexedZeroPageX
+	(37, 6, 5),  // 0x36 ROL IndexedZeroPageX
+	(0, 1, 0),   // 0x37 INV
+	(40, 2, 7),  // 0x38 SEC Implied
+	(2, 4, 3),   // 0x39 AND IndexedAbsoluteY
+	(0, 1, 0),   // 0x3A INV
+	(0, 1, 0),   // 0x3B INV
+	(0, 1, 0),   // 0x3C INV
+	(2, 4, 2),   // 0x3D AND IndexedAbsoluteX
+	(37, 7, 2),  // 0x3E ROL IndexedAbsoluteX
+	(0, 1, 0),   // 0x3F INV
+	// 0x40-0x4F
+	(39, 6, 7),  // 0x40 RTI Implied
+	(24, 6, 10), // 0x41 EOR IndexedIndirectX
+	(0, 1, 0),   // 0x42 INV
+	(0, 1, 0),   // 0x43 INV
+	(0, 1, 0),   // 0x44 INV
+	(24, 3, 4),  // 0x45 EOR ZeroPage
+	(32, 5, 4),  // 0x46 LSR ZeroPage
+	(0, 1, 0),   // 0x47 INV
+	(34, 3, 7),  // 0x48 PHA Implied - note: reusing ORA code, but it's actually PHA
+	(24, 2, 0),  // 0x49 EOR Immediate
+	(32, 2, 8),  // 0x4A LSR Accumulator
+	(0, 1, 0),   // 0x4B INV
+	(27, 3, 1),  // 0x4C JMP Absolute
+	(24, 4, 1),  // 0x4D EOR Absolute
+	(32, 6, 1),  // 0x4E LSR Absolute
+	(0, 1, 0),   // 0x4F INV
+	// 0x50-0x5F
+	(13, 2, 12), // 0x50 BVC Relative
+	(24, 5, 11), // 0x51 EOR IndexedIndirectY
+	(0, 1, 0),   // 0x52 INV
+	(0, 1, 0),   // 0x53 INV
+	(0, 1, 0),   // 0x54 INV
+	(24, 4, 5),  // 0x55 EOR IndexedZeroPageX
+	(32, 6, 5),  // 0x56 LSR IndexedZeroPageX
+	(0, 1, 0),   // 0x57 INV
+	(17, 2, 7),  // 0x58 CLI Implied
+	(24, 4, 3),  // 0x59 EOR IndexedAbsoluteY
+	(0, 1, 0),   // 0x5A INV
+	(0, 1, 0),   // 0x5B INV
+	(0, 1, 0),   // 0x5C INV
+	(24, 4, 2),  // 0x5D EOR IndexedAbsoluteX
+	(32, 7, 2),  // 0x5E LSR IndexedAbsoluteX
+	(0, 1, 0),   // 0x5F INV
+	// 0x60-0x6F
+	(38, 6, 7),  // 0x60 RTS Implied
+	(1, 6, 10),  // 0x61 ADC IndexedIndirectX
+	(0, 1, 0),   // 0x62 INV
+	(0, 1, 0),   // 0x63 INV
+	(0, 1, 0),   // 0x64 INV
+	(1, 3, 4),   // 0x65 ADC ZeroPage
+	(38, 5, 4),  // 0x66 ROR ZeroPage - note: code 38 is RTS, this should be ROR
+	(0, 1, 0),   // 0x67 INV
+	(36, 4, 7),  // 0x68 PLA Implied - note: reusing PLP code
+	(1, 2, 0),   // 0x69 ADC Immediate
+	(38, 2, 8),  // 0x6A ROR Accumulator - note: code 38 is RTS
+	(0, 1, 0),   // 0x6B INV
+	(27, 5, 9),  // 0x6C JMP Indirect
+	(1, 4, 1),   // 0x6D ADC Absolute
+	(38, 6, 1),  // 0x6E ROR Absolute
+	(0, 1, 0),   // 0x6F INV
+	// 0x70-0x7F
+	(14, 2, 12), // 0x70 BVS Relative
+	(1, 5, 11),  // 0x71 ADC IndexedIndirectY
+	(0, 1, 0),   // 0x72 INV
+	(0, 1, 0),   // 0x73 INV
+	(0, 1, 0),   // 0x74 INV
+	(1, 4, 5),   // 0x75 ADC IndexedZeroPageX
+	(38, 6, 5),  // 0x76 ROR IndexedZeroPageX
+	(0, 1, 0),   // 0x77 INV
+	(42, 2, 7),  // 0x78 SEI Implied
+	(1, 4, 3),   // 0x79 ADC IndexedAbsoluteY
+	(0, 1, 0),   // 0x7A INV
+	(0, 1, 0),   // 0x7B INV
+	(0, 1, 0),   // 0x7C INV
+	(1, 4, 2),   // 0x7D ADC IndexedAbsoluteX
+	(38, 7, 2),  // 0x7E ROR IndexedAbsoluteX
+	(0, 1, 0),   // 0x7F INV
+	// 0x80-0x8F
+	(0, 1, 0),   // 0x80 INV
+	(43, 6, 10), // 0x81 STA IndexedIndirectX
+	(0, 1, 0),   // 0x82 INV
+	(0, 1, 0),   // 0x83 INV
+	(45, 3, 4),  // 0x84 STY ZeroPage
+	(43, 3, 4),  // 0x85 STA ZeroPage
+	(44, 3, 4),  // 0x86 STX ZeroPage
+	(0, 1, 0),   // 0x87 INV
+	(23, 2, 7),  // 0x88 DEY Implied
+	(0, 1, 0),   // 0x89 INV
+	(48, 2, 7),  // 0x8A TXA Implied
+	(0, 1, 0),   // 0x8B INV
+	(45, 4, 1),  // 0x8C STY Absolute
+	(43, 4, 1),  // 0x8D STA Absolute
+	(44, 4, 1),  // 0x8E STX Absolute
+	(0, 1, 0),   // 0x8F INV
+	// 0x90-0x9F
+	(4, 2, 12),  // 0x90 BCC Relative
+	(43, 6, 11), // 0x91 STA IndexedIndirectY
+	(0, 1, 0),   // 0x92 INV
+	(0, 1, 0),   // 0x93 INV
+	(45, 4, 5),  // 0x94 STY IndexedZeroPageX
+	(43, 4, 5),  // 0x95 STA IndexedZeroPageX
+	(44, 4, 6),  // 0x96 STX IndexedZeroPageY
+	(0, 1, 0),   // 0x97 INV
+	(50, 2, 7),  // 0x98 TYA Implied
+	(43, 5, 3),  // 0x99 STA IndexedAbsoluteY
+	(49, 2, 7),  // 0x9A TXS Implied
+	(0, 1, 0),   // 0x9B INV
+	(0, 1, 0),   // 0x9C INV
+	(43, 5, 2),  // 0x9D STA IndexedAbsoluteX
+	(0, 1, 0),   // 0x9E INV
+	(0, 1, 0),   // 0x9F INV
+	// 0xA0-0xAF
+	(31, 2, 0),  // 0xA0 LDY Immediate
+	(29, 6, 10), // 0xA1 LDA IndexedIndirectX
+	(30, 2, 0),  // 0xA2 LDX Immediate
+	(0, 1, 0),   // 0xA3 INV
+	(31, 3, 4),  // 0xA4 LDY ZeroPage
+	(29, 3, 4),  // 0xA5 LDA ZeroPage
+	(30, 3, 4),  // 0xA6 LDX ZeroPage
+	(0, 1, 0),   // 0xA7 INV
+	(47, 2, 7),  // 0xA8 TAY Implied
+	(29, 2, 0),  // 0xA9 LDA Immediate
+	(46, 2, 7),  // 0xAA TAX Implied
+	(0, 1, 0),   // 0xAB INV
+	(31, 4, 1),  // 0xAC LDY Absolute
+	(29, 4, 1),  // 0xAD LDA Absolute
+	(30, 4, 1),  // 0xAE LDX Absolute
+	(0, 1, 0),   // 0xAF INV
+	// 0xB0-0xBF
+	(5, 2, 12),  // 0xB0 BCS Relative
+	(29, 5, 11), // 0xB1 LDA IndexedIndirectY
+	(0, 1, 0),   // 0xB2 INV
+	(0, 1, 0),   // 0xB3 INV
+	(31, 4, 5),  // 0xB4 LDY IndexedZeroPageX
+	(29, 4, 5),  // 0xB5 LDA IndexedZeroPageX
+	(30, 4, 6),  // 0xB6 LDX IndexedZeroPageY
+	(0, 1, 0),   // 0xB7 INV
+	(18, 2, 7),  // 0xB8 CLV Implied
+	(29, 4, 3),  // 0xB9 LDA IndexedAbsoluteY
+	(47, 2, 7),  // 0xBA TSX Implied - note: reusing TAY code
+	(0, 1, 0),   // 0xBB INV
+	(31, 4, 2),  // 0xBC LDY IndexedAbsoluteX
+	(29, 4, 2),  // 0xBD LDA IndexedAbsoluteX
+	(30, 4, 3),  // 0xBE LDX IndexedAbsoluteY
+	(0, 1, 0),   // 0xBF INV
+	// 0xC0-0xCF
+	(21, 2, 0),  // 0xC0 CPY Immediate
+	(19, 6, 10), // 0xC1 CMP IndexedIndirectX
+	(0, 1, 0),   // 0xC2 INV
+	(0, 1, 0),   // 0xC3 INV
+	(21, 3, 4),  // 0xC4 CPY ZeroPage
+	(19, 3, 4),  // 0xC5 CMP ZeroPage
+	(22, 5, 4),  // 0xC6 DEC ZeroPage
+	(0, 1, 0),   // 0xC7 INV
+	(26, 2, 7),  // 0xC8 INY Implied
+	(19, 2, 0),  // 0xC9 CMP Immediate
+	(22, 2, 7),  // 0xCA DEX Implied - note: reusing DEC code
+	(0, 1, 0),   // 0xCB INV
+	(21, 4, 1),  // 0xCC CPY Absolute
+	(19, 4, 1),  // 0xCD CMP Absolute
+	(22, 6, 1),  // 0xCE DEC Absolute
+	(0, 1, 0),   // 0xCF INV
+	// 0xD0-0xDF
+	(8, 2, 12),  // 0xD0 BNE Relative
+	(19, 5, 11), // 0xD1 CMP IndexedIndirectY
+	(0, 1, 0),   // 0xD2 INV
+	(0, 1, 0),   // 0xD3 INV
+	(0, 1, 0),   // 0xD4 INV
+	(19, 4, 5),  // 0xD5 CMP IndexedZeroPageX
+	(22, 6, 5),  // 0xD6 DEC IndexedZeroPageX
+	(0, 1, 0),   // 0xD7 INV
+	(16, 2, 7),  // 0xD8 CLD Implied
+	(19, 4, 3),  // 0xD9 CMP IndexedAbsoluteY
+	(0, 1, 0),   // 0xDA INV
+	(0, 1, 0),   // 0xDB INV
+	(0, 1, 0),   // 0xDC INV
+	(19, 4, 2),  // 0xDD CMP IndexedAbsoluteX
+	(22, 7, 2),  // 0xDE DEC IndexedAbsoluteX
+	(0, 1, 0),   // 0xDF INV
+	// 0xE0-0xEF
+	(20, 2, 0),  // 0xE0 CPX Immediate
+	(41, 6, 10), // 0xE1 SBC IndexedIndirectX
+	(0, 1, 0),   // 0xE2 INV
+	(0, 1, 0),   // 0xE3 INV
+	(20, 3, 4),  // 0xE4 CPX ZeroPage
+	(41, 3, 4),  // 0xE5 SBC ZeroPage
+	(25, 5, 4),  // 0xE6 INC ZeroPage
+	(0, 1, 0),   // 0xE7 INV
+	(26, 2, 7),  // 0xE8 INX Implied - note: reusing INY code
+	(41, 2, 0),  // 0xE9 SBC Immediate
+	(33, 2, 7),  // 0xEA NOP Implied
+	(0, 1, 0),   // 0xEB INV
+	(20, 4, 1),  // 0xEC CPX Absolute
+	(41, 4, 1),  // 0xED SBC Absolute
+	(25, 6, 1),  // 0xEE INC Absolute
+	(0, 1, 0),   // 0xEF INV
+	// 0xF0-0xFF
+	(6, 2, 12),  // 0xF0 BEQ Relative
+	(41, 5, 11), // 0xF1 SBC IndexedIndirectY
+	(0, 1, 0),   // 0xF2 INV
+	(0, 1, 0),   // 0xF3 INV
+	(0, 1, 0),   // 0xF4 INV
+	(41, 4, 5),  // 0xF5 SBC IndexedZeroPageX
+	(25, 6, 5),  // 0xF6 INC IndexedZeroPageX
+	(0, 1, 0),   // 0xF7 INV
+	(41, 2, 7),  // 0xF8 SED Implied - note: reusing SBC code
+	(41, 4, 3),  // 0xF9 SBC IndexedAbsoluteY
+	(0, 1, 0),   // 0xFA INV
+	(0, 1, 0),   // 0xFB INV
+	(0, 1, 0),   // 0xFC INV
+	(41, 4, 2),  // 0xFD SBC IndexedAbsoluteX
+	(25, 7, 2),  // 0xFE INC IndexedAbsoluteX
+	(0, 1, 0),   // 0xFF INV
+];
+
+#[inline(always)]
+fn decode_instruction_type(code: u8) -> InstructionTypes {
+	match code {
+		0 => InstructionTypes::INV,
+		1 => InstructionTypes::ADC,
+		2 => InstructionTypes::AND,
+		3 => InstructionTypes::ASL,
+		4 => InstructionTypes::BCC,
+		5 => InstructionTypes::BCS,
+		6 => InstructionTypes::BEQ,
+		7 => InstructionTypes::BIT, // Not used directly - special cases below
+		8 => InstructionTypes::BNE,
+		9 => InstructionTypes::BMI,
+		10 => InstructionTypes::BIT,
+		11 => InstructionTypes::BPL,
+		12 => InstructionTypes::BRK,
+		13 => InstructionTypes::BVC,
+		14 => InstructionTypes::BVS,
+		15 => InstructionTypes::CLC,
+		16 => InstructionTypes::CLD,
+		17 => InstructionTypes::CLI,
+		18 => InstructionTypes::CLV,
+		19 => InstructionTypes::CMP,
+		20 => InstructionTypes::CPX,
+		21 => InstructionTypes::CPY,
+		22 => InstructionTypes::DEC,
+		23 => InstructionTypes::DEY,
+		24 => InstructionTypes::EOR,
+		25 => InstructionTypes::INC,
+		26 => InstructionTypes::INY,
+		27 => InstructionTypes::JMP,
+		28 => InstructionTypes::JSR,
+		29 => InstructionTypes::LDA,
+		30 => InstructionTypes::LDX,
+		31 => InstructionTypes::LDY,
+		32 => InstructionTypes::LSR,
+		33 => InstructionTypes::NOP,
+		34 => InstructionTypes::ORA,
+		35 => InstructionTypes::PHP,
+		36 => InstructionTypes::PLP,
+		37 => InstructionTypes::ROL,
+		38 => InstructionTypes::ROR,
+		39 => InstructionTypes::RTI,
+		40 => InstructionTypes::SEC,
+		41 => InstructionTypes::SBC,
+		42 => InstructionTypes::SEI,
+		43 => InstructionTypes::STA,
+		44 => InstructionTypes::STX,
+		45 => InstructionTypes::STY,
+		46 => InstructionTypes::TAX,
+		47 => InstructionTypes::TAY,
+		48 => InstructionTypes::TXA,
+		49 => InstructionTypes::TXS,
+		50 => InstructionTypes::TYA,
+		51 => InstructionTypes::TSX,
+		52 => InstructionTypes::PHA,
+		53 => InstructionTypes::PLA,
+		54 => InstructionTypes::RTS,
+		55 => InstructionTypes::SED,
+		56 => InstructionTypes::DEX,
+		57 => InstructionTypes::INX,
+		_ => InstructionTypes::INV,
+	}
+}
+
+#[inline(always)]
+fn decode_addressing_mode(code: u8) -> AddressingModes {
+	match code {
+		0 => AddressingModes::Immediate,
+		1 => AddressingModes::Absolute,
+		2 => AddressingModes::IndexedAbsoluteX,
+		3 => AddressingModes::IndexedAbsoluteY,
+		4 => AddressingModes::ZeroPage,
+		5 => AddressingModes::IndexedZeroPageX,
+		6 => AddressingModes::IndexedZeroPageY,
+		7 => AddressingModes::Implied,
+		8 => AddressingModes::Accumulator,
+		9 => AddressingModes::Indirect,
+		10 => AddressingModes::IndexedIndirectX,
+		11 => AddressingModes::IndexedIndirectY,
+		12 => AddressingModes::Relative,
+		_ => AddressingModes::Immediate,
+	}
+}
+
+// Fast O(1) opcode lookup using static table
+#[inline(always)]
 fn operation(opc: u8) -> Operation {
-	match opc {
-		0x00 => Operation {
-			instruction_type: InstructionTypes::BRK,
-			cycle: 7,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x01 => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0x02 => invalid
-		// 0x03 => invalid
-		// 0x04 => invalid
-		0x05 => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x06 => Operation {
-			instruction_type: InstructionTypes::ASL,
-			cycle: 5,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0x07 => invalid
-		0x08 => Operation {
-			instruction_type: InstructionTypes::PHP,
-			cycle: 3,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x09 => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0x0A => Operation {
-			instruction_type: InstructionTypes::ASL,
-			cycle: 2,
-			addressing_mode: AddressingModes::Accumulator
-		},
-		// 0x0B => invalid
-		// 0x0C => invalid
-		0x0D => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x0E => Operation {
-			instruction_type: InstructionTypes::ASL,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0x0F => invalid
-		0x10 => Operation {
-			instruction_type: InstructionTypes::BPL,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0x11 => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 5, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0x12 => invalid
-		// 0x13 => invalid
-		// 0x14 => invalid
-		0x15 => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0x16 => Operation {
-			instruction_type: InstructionTypes::ASL,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		// 0x17 => invalid
-		0x18 => Operation {
-			instruction_type: InstructionTypes::CLC,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x19 => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0x1A => invalid
-		// 0x1B => invalid
-		// 0x1C => invalid
-		0x1D => Operation {
-			instruction_type: InstructionTypes::ORA,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0x1E => Operation {
-			instruction_type: InstructionTypes::ASL,
-			cycle: 7,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0x1F => invalid
-		0x20 => Operation {
-			instruction_type: InstructionTypes::JSR,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x21 => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0x22 => invalid
-		// 0x23 => invalid
-		0x24 => Operation {
-			instruction_type: InstructionTypes::BIT,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x25 => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x26 => Operation {
-			instruction_type: InstructionTypes::ROL,
-			cycle: 5,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0x27 => invalid
-		0x28 => Operation {
-			instruction_type: InstructionTypes::PLP,
-			cycle: 4,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x29 => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0x2A => Operation {
-			instruction_type: InstructionTypes::ROL,
-			cycle: 2,
-			addressing_mode: AddressingModes::Accumulator
-		},
-		// 0x2B => invalid
-		0x2C => Operation {
-			instruction_type: InstructionTypes::BIT,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x2D => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x2E => Operation {
-			instruction_type: InstructionTypes::ROL,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0x2F => invalid
-		0x30 => Operation {
-			instruction_type: InstructionTypes::BMI,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0x31 => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 5, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0x32 => invalid
-		// 0x33 => invalid
-		// 0x34 => invalid
-		0x35 => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0x36 => Operation {
-			instruction_type: InstructionTypes::ROL,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		// 0x37 => invalid
-		0x38 => Operation {
-			instruction_type: InstructionTypes::SEC,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x39 => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0x3A => invalid
-		// 0x3B => invalid
-		// 0x3C => invalid
-		0x3D => Operation {
-			instruction_type: InstructionTypes::AND,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0x3E => Operation {
-			instruction_type: InstructionTypes::ROL,
-			cycle: 7,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0x3F => invalid
-		0x40 => Operation {
-			instruction_type: InstructionTypes::RTI,
-			cycle: 6,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x41 => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0x42 => invalid
-		// 0x43 => invalid
-		// 0x44 => invalid
-		0x45 => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x46 => Operation {
-			instruction_type: InstructionTypes::LSR,
-			cycle: 5,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0x47 => invalid
-		0x48 => Operation {
-			instruction_type: InstructionTypes::PHA,
-			cycle: 3,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x49 => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0x4A => Operation {
-			instruction_type: InstructionTypes::LSR,
-			cycle: 2,
-			addressing_mode: AddressingModes::Accumulator
-		},
-		// 0x4B => invalid
-		0x4C => Operation {
-			instruction_type: InstructionTypes::JMP,
-			cycle: 3,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x4D => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x4E => Operation {
-			instruction_type: InstructionTypes::LSR,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0x4F => invalid
-		0x50 => Operation {
-			instruction_type: InstructionTypes::BVC,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0x51 => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 5, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0x52 => invalid
-		// 0x53 => invalid
-		// 0x54 => invalid
-		0x55 => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0x56 => Operation {
-			instruction_type: InstructionTypes::LSR,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		// 0x57 => invalid
-		0x58 => Operation {
-			instruction_type: InstructionTypes::CLI,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x59 => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0x5A => invalid
-		// 0x5B => invalid
-		// 0x5C => invalid
-		0x5D => Operation {
-			instruction_type: InstructionTypes::EOR,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0x5E => Operation {
-			instruction_type: InstructionTypes::LSR,
-			cycle: 7,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0x5F => invalid
-		0x60 => Operation {
-			instruction_type: InstructionTypes::RTS,
-			cycle: 6,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x61 => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0x62 => invalid
-		// 0x63 => invalid
-		// 0x64 => invalid
-		0x65 => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x66 => Operation {
-			instruction_type: InstructionTypes::ROR,
-			cycle: 5,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0x67 => invalid
-		0x68 => Operation {
-			instruction_type: InstructionTypes::PLA,
-			cycle: 4,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x69 => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0x6A => Operation {
-			instruction_type: InstructionTypes::ROR,
-			cycle: 2,
-			addressing_mode: AddressingModes::Accumulator
-		},
-		// 0x6B => invalid
-		0x6C => Operation {
-			instruction_type: InstructionTypes::JMP,
-			cycle: 5,
-			addressing_mode: AddressingModes::Indirect
-		},
-		0x6D => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x6E => Operation {
-			instruction_type: InstructionTypes::ROR,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0x6F => invalid
-		0x70 => Operation {
-			instruction_type: InstructionTypes::BVS,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0x71 => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 5, // @TODO +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0x72 => invalid
-		// 0x73 => invalid
-		// 0x74 => invalid
-		0x75 => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0x76 => Operation {
-			instruction_type: InstructionTypes::ROR,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		// 0x77 => invalid
-		0x78 => Operation {
-			instruction_type: InstructionTypes::SEI,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x79 => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0x7A => invalid
-		// 0x7B => invalid
-		// 0x7C => invalid
-		0x7D => Operation {
-			instruction_type: InstructionTypes::ADC,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0x7E => Operation {
-			instruction_type: InstructionTypes::ROR,
-			cycle: 7,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0x7F => invalid
-		// 0x80 => invalid
-		0x81 => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0x82 => invalid
-		// 0x83 => invalid
-		0x84 => Operation {
-			instruction_type: InstructionTypes::STY,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x85 => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0x86 => Operation {
-			instruction_type: InstructionTypes::STX,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0x87 => invalid
-		0x88 => Operation {
-			instruction_type: InstructionTypes::DEY,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0x89 => invalid
-		0x8A => Operation {
-			instruction_type: InstructionTypes::TXA,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0x8B => invalid
-		0x8C => Operation {
-			instruction_type: InstructionTypes::STY,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x8D => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0x8E => Operation {
-			instruction_type: InstructionTypes::STX,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0x8F => invalid
-		0x90 => Operation {
-			instruction_type: InstructionTypes::BCC,
-			cycle: 2, // +1 if branch suceeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0x91 => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0x92 => invalid
-		// 0x93 => invalid
-		0x94 => Operation {
-			instruction_type: InstructionTypes::STY,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0x95 => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0x96 => Operation {
-			instruction_type: InstructionTypes::STX,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageY
-		},
-		// 0x97 => invalid
-		0x98 => Operation {
-			instruction_type: InstructionTypes::TYA,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0x99 => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 5,
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		0x9A => Operation {
-			instruction_type: InstructionTypes::TXS,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0x9B => invalid
-		// 0x9C => invalid
-		0x9D => Operation {
-			instruction_type: InstructionTypes::STA,
-			cycle: 5,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0x9E => invalid
-		// 0x9F => invalid
-		0xA0 => Operation {
-			instruction_type: InstructionTypes::LDY,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0xA1 => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		0xA2 => Operation {
-			instruction_type: InstructionTypes::LDX,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		// 0xA3 => invalid
-		0xA4 => Operation {
-			instruction_type: InstructionTypes::LDY,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0xA5 => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0xA6 => Operation {
-			instruction_type: InstructionTypes::LDX,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0xA7 => invalid
-		0xA8 => Operation {
-			instruction_type: InstructionTypes::TAY,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0xA9 => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0xAA => Operation {
-			instruction_type: InstructionTypes::TAX,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0xAB => invalid
-		0xAC => Operation {
-			instruction_type: InstructionTypes::LDY,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0xAD => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0xAE => Operation {
-			instruction_type: InstructionTypes::LDX,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0xAF => invalid
-		0xB0 => Operation {
-			instruction_type: InstructionTypes::BCS,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0xB1 => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 5, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0xB2 => invalid
-		// 0xB3 => invalid
-		0xB4 => Operation {
-			instruction_type: InstructionTypes::LDY,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0xB5 => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0xB6 => Operation {
-			instruction_type: InstructionTypes::LDX,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageY
-		},
-		// 0xB7 => invalid
-		0xB8 => Operation {
-			instruction_type: InstructionTypes::CLV,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0xB9 => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		0xBA => Operation {
-			instruction_type: InstructionTypes::TSX,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0xBB => invalid
-		0xBC => Operation {
-			instruction_type: InstructionTypes::LDY,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0xBD => Operation {
-			instruction_type: InstructionTypes::LDA,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0xBE => Operation {
-			instruction_type: InstructionTypes::LDX,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0xBF => invalid
-		0xC0 => Operation {
-			instruction_type: InstructionTypes::CPY,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0xC1 => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0xC2 => invalid
-		// 0xC3 => invalid
-		0xC4 => Operation {
-			instruction_type: InstructionTypes::CPY,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0xC5 => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0xC6 => Operation {
-			instruction_type: InstructionTypes::DEC,
-			cycle: 5,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0xC7 => invalid
-		0xC8 => Operation {
-			instruction_type: InstructionTypes::INY,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0xC9 => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0xCA => Operation {
-			instruction_type: InstructionTypes::DEX,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0xCB => invalid
-		0xCC => Operation {
-			instruction_type: InstructionTypes::CPY,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0xCD => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0xCE => Operation {
-			instruction_type: InstructionTypes::DEC,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0xCF => invalid
-		0xD0 => Operation {
-			instruction_type: InstructionTypes::BNE,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0xD1 => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 5, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0xD2 => invalid
-		// 0xD3 => invalid
-		// 0xD4 => invalid
-		0xD5 => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0xD6 => Operation {
-			instruction_type: InstructionTypes::DEC,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		// 0xD7 => invalid
-		0xD8 => Operation {
-			instruction_type: InstructionTypes::CLD,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0xD9 => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0xDA => invalid
-		// 0xDB => invalid
-		// 0xDC => invalid
-		0xDD => Operation {
-			instruction_type: InstructionTypes::CMP,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0xDE => Operation {
-			instruction_type: InstructionTypes::DEC,
-			cycle: 7,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0xDF => invalid
-		0xE0 => Operation {
-			instruction_type: InstructionTypes::CPX,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0xE1 => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedIndirectX
-		},
-		// 0xE2 => invalid
-		// 0xE3 => invalid
-		0xE4 => Operation {
-			instruction_type: InstructionTypes::CPX,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0xE5 => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 3,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		0xE6 => Operation {
-			instruction_type: InstructionTypes::INC,
-			cycle: 5,
-			addressing_mode: AddressingModes::ZeroPage
-		},
-		// 0xE7 => invalid
-		0xE8 => Operation {
-			instruction_type: InstructionTypes::INX,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0xE9 => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 2,
-			addressing_mode: AddressingModes::Immediate
-		},
-		0xEA => Operation {
-			instruction_type: InstructionTypes::NOP,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		// 0xEB => invalid
-		0xEC => Operation {
-			instruction_type: InstructionTypes::CPX,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0xED => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 4,
-			addressing_mode: AddressingModes::Absolute
-		},
-		0xEE => Operation {
-			instruction_type: InstructionTypes::INC,
-			cycle: 6,
-			addressing_mode: AddressingModes::Absolute
-		},
-		// 0xEF => invalid
-		0xF0 => Operation {
-			instruction_type: InstructionTypes::BEQ,
-			cycle: 2, // +1 if branch succeeds, +2 if to a new page
-			addressing_mode: AddressingModes::Relative
-		},
-		0xF1 => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 5, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedIndirectY
-		},
-		// 0xF2 => invalid
-		// 0xF3 => invalid
-		// 0xF4 => invalid
-		0xF5 => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 4,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		0xF6 => Operation {
-			instruction_type: InstructionTypes::INC,
-			cycle: 6,
-			addressing_mode: AddressingModes::IndexedZeroPageX
-		},
-		// 0xF7 => invalid
-		0xF8 => Operation {
-			instruction_type: InstructionTypes::SED,
-			cycle: 2,
-			addressing_mode: AddressingModes::Implied
-		},
-		0xF9 => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteY
-		},
-		// 0xFA => invalid
-		// 0xFB => invalid
-		// 0xFC => invalid
-		0xFD => Operation {
-			instruction_type: InstructionTypes::SBC,
-			cycle: 4, // +1 if page crossed
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		0xFE => Operation {
-			instruction_type: InstructionTypes::INC,
-			cycle: 7,
-			addressing_mode: AddressingModes::IndexedAbsoluteX
-		},
-		// 0xFF => invalid
-		_ => Operation {
-			instruction_type: InstructionTypes::INV,
-			cycle: 1,
-			addressing_mode: AddressingModes::Immediate // dummy
-		}
+	let (inst, cyc, addr) = OPCODE_TABLE[opc as usize];
+
+	// Handle special cases that the table encoding doesn't capture perfectly
+	let instruction_type = match opc {
+		0x48 => InstructionTypes::PHA,
+		0x68 => InstructionTypes::PLA,
+		0x60 => InstructionTypes::RTS,
+		0x66 | 0x6A | 0x6E | 0x76 | 0x7E => InstructionTypes::ROR,
+		0xBA => InstructionTypes::TSX,
+		0xCA => InstructionTypes::DEX,
+		0xE8 => InstructionTypes::INX,
+		0xF8 => InstructionTypes::SED,
+		_ => decode_instruction_type(inst),
+	};
+
+	Operation {
+		instruction_type,
+		cycle: cyc,
+		addressing_mode: decode_addressing_mode(addr),
 	}
 }
 
@@ -1111,7 +630,7 @@ impl Cpu {
 			apu: Apu::new(audio),
 			joypad1: Joypad::new(),
 			joypad2: Joypad::new(),
-			rom: Rom::new(vec![0; HEADER_SIZE]) // dummy
+			rom: Rom::new(vec![0; HEADER_SIZE]).unwrap() // dummy
 		}
 	}
 
@@ -1173,6 +692,7 @@ impl Cpu {
 
 	//
 
+	#[inline]
 	pub fn step(&mut self) {
 		let stall_cycles = self.step_internal();
 		for _i in 0..stall_cycles * 3 {
@@ -1234,11 +754,18 @@ impl Cpu {
 				button::Button::Joypad2Left |
 				button::Button::Joypad2Right => {
 					self.joypad2.handle_input(to_joypad_button(button), event);
-				}
+				},
+                button::Button::X |
+                button::Button::Y |
+                button::Button::L |
+                button::Button::R => {
+                    // Do nothing for NES
+                }
 			}
 		}
 	}
 
+	#[inline]
 	fn step_internal(&mut self) -> u16 {
 		// @TODO: What if both NMI and IRQ happen?
 		if self.ppu.nmi_interrupted {
@@ -1262,12 +789,14 @@ impl Cpu {
 		stall_cycles + op.cycle as u16
 	}
 
+	#[inline(always)]
 	fn fetch(&mut self) -> u8 {
 		let opc = self.load(self.pc.load());
 		self.pc.increment();
 		opc
 	}
 
+	#[inline(always)]
 	fn decode(&self, opc: u8) -> Operation {
 		operation(opc)
 	}
@@ -1728,6 +1257,7 @@ impl Cpu {
 		}
 	}
 
+	#[inline]
 	pub fn load(&mut self, address: u16) -> u8 {
 		// 0x0000 - 0x07FF: 2KB internal RAM
 		// 0x0800 - 0x1FFF: Mirrors of 0x0000 - 0x07FF (repeats every 0x800 bytes)
@@ -1800,6 +1330,7 @@ impl Cpu {
 		(byte_high << 8) | byte_low
 	}
 
+	#[inline]
 	fn store(&mut self, address: u16, value: u8) {
 		// 0x0000 - 0x07FF: 2KB internal RAM
 		// 0x0800 - 0x1FFF: Mirrors of 0x0000 - 0x07FF (repeats every 0x800 bytes)
@@ -2183,6 +1714,64 @@ impl Cpu {
 			},
 			_ => { "".to_owned() }
 		}
+	}
+
+	/// Save the complete emulator state
+	pub fn save_state(&self) -> SaveState {
+		let mut state = SaveState::new();
+
+		// CPU state
+		state.cpu = CpuState {
+			pc: self.pc.get_data(),
+			sp: self.sp.get_data(),
+			a: self.a.get_data(),
+			x: self.x.get_data(),
+			y: self.y.get_data(),
+			p: self.p.load(),
+			ram: self.ram.get_data(),
+			stall_cycles: self.stall_cycles,
+		};
+
+		// PPU state
+		state.ppu = self.ppu.save_state();
+
+		// APU state
+		state.apu = self.apu.save_state();
+
+		// Joypad state
+		state.joypad1 = self.joypad1.save_state();
+		state.joypad2 = self.joypad2.save_state();
+
+		// Mapper state
+		state.mapper = self.rom.save_mapper_state();
+
+		state
+	}
+
+	/// Load a previously saved state
+	pub fn load_state(&mut self, state: &SaveState) {
+		// CPU state
+		self.pc.set_data(state.cpu.pc);
+		self.sp.set_data(state.cpu.sp);
+		self.a.set_data(state.cpu.a);
+		self.x.set_data(state.cpu.x);
+		self.y.set_data(state.cpu.y);
+		self.p.store(state.cpu.p);
+		self.ram.set_data(&state.cpu.ram);
+		self.stall_cycles = state.cpu.stall_cycles;
+
+		// PPU state
+		self.ppu.load_state(&state.ppu);
+
+		// APU state
+		self.apu.load_state(&state.apu);
+
+		// Joypad state
+		self.joypad1.load_state(&state.joypad1);
+		self.joypad2.load_state(&state.joypad2);
+
+		// Mapper state
+		self.rom.load_mapper_state(&state.mapper);
 	}
 }
 

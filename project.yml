@@ -1,0 +1,22 @@
+name: StikEMU
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: 15.0
+targets:
+  StikEMU:
+    type: application
+    platform: iOS
+    sources:
+      - path: StikEMU
+    settings:
+      PRODUCT_NAME: StikEMU
+      SWIFT_OBJC_BRIDGING_HEADER: StikEMU/StikEMU-Bridging-Header.h
+      INFOPLIST_FILE: StikEMU/Info.plist
+    dependencies:
+      - package: NesRust
+      - framework: ios/NesRust.xcframework
+      - framework: ios/SDL2.xcframework
+packages:
+  NesRust:
+    path: .

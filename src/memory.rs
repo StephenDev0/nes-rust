@@ -17,12 +17,25 @@ impl Memory {
 		self.data.len() as u32
 	}
 
+	#[inline(always)]
 	pub fn load(&self, address: u32) -> u8 {
 		self.data[address as usize]
 	}
 
+	#[inline(always)]
 	pub fn store(&mut self, address: u32, value: u8) {
 		self.data[address as usize] = value;
+	}
+
+	/// Get a copy of all memory data for save states
+	pub fn get_data(&self) -> Vec<u8> {
+		self.data.clone()
+	}
+
+	/// Set memory data from a save state
+	pub fn set_data(&mut self, data: &[u8]) {
+		let len = std::cmp::min(self.data.len(), data.len());
+		self.data[..len].copy_from_slice(&data[..len]);
 	}
 }
 

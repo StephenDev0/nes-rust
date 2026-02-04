@@ -1,5 +1,6 @@
 use register::Register;
 use audio::Audio;
+use save_state::{ApuState, ApuPulseState, ApuTriangleState, ApuNoiseState, ApuDmcState};
 
 /*
  * Audio Processing Unit implementation. Consists of
@@ -72,6 +73,7 @@ impl Apu {
 	}
 
 	// Expects being called at CPU clock rate
+	#[inline]
 	pub fn step(&mut self, dmc_sample_data: u8) {
 		self.cycle += 1;
 
@@ -306,6 +308,38 @@ impl Apu {
 
 		self.audio.push(pulse_out + tnd_out);
 	}
+
+	/// Save APU state
+	pub fn save_state(&self) -> ApuState {
+		ApuState {
+			cycle: self.cycle,
+			step: self.step,
+			pulse1: self.pulse1.save_state(),
+			pulse2: self.pulse2.save_state(),
+			triangle: self.triangle.save_state(),
+			noise: self.noise.save_state(),
+			dmc: self.dmc.save_state(),
+			status: self.status.get_data(),
+			frame: self.frame.register.get_data(),
+			frame_irq_active: self.frame_irq_active,
+			dmc_irq_active: self.dmc_irq_active,
+		}
+	}
+
+	/// Load APU state
+	pub fn load_state(&mut self, state: &ApuState) {
+		self.cycle = state.cycle;
+		self.step = state.step;
+		self.pulse1.load_state(&state.pulse1);
+		self.pulse2.load_state(&state.pulse2);
+		self.triangle.load_state(&state.triangle);
+		self.noise.load_state(&state.noise);
+		self.dmc.load_state(&state.dmc);
+		self.status.set_data(state.status);
+		self.frame.register.set_data(state.frame);
+		self.frame_irq_active = state.frame_irq_active;
+		self.dmc_irq_active = state.dmc_irq_active;
+	}
 }
 
 /**
@@ -411,6 +445,7 @@ impl ApuPulse {
 		}
 	}
 
+	#[inline(always)]
 	fn drive_timer(&mut self) {
 		if self.timer_counter > 0 {
 			self.timer_counter -= 1;
@@ -425,6 +460,7 @@ impl ApuPulse {
 		}
 	}
 
+	#[inline]
 	fn drive_length(&mut self) {
 		if !self.envelope_loop_enabled() && self.length_counter > 0 {
 			self.length_counter -= 1;
@@ -543,6 +579,42 @@ impl ApuPulse {
 	fn length_counter_index(&self) -> u8 {
 		self.register3.load_bits(3, 5)
 	}
+
+	fn save_state(&self) -> ApuPulseState {
+		ApuPulseState {
+			register0: self.register0.get_data(),
+			register1: self.register1.get_data(),
+			register2: self.register2.get_data(),
+			register3: self.register3.get_data(),
+			enabled: self.enabled,
+			timer_counter: self.timer_counter,
+			timer_period: self.timer_period,
+			timer_sequence: self.timer_sequence,
+			envelope_start_flag: self.envelope_start_flag,
+			envelope_counter: self.envelope_counter,
+			envelope_decay_level_counter: self.envelope_decay_level_counter,
+			length_counter: self.length_counter,
+			sweep_reload_flag: self.sweep_reload_flag,
+			sweep_counter: self.sweep_counter,
+		}
+	}
+
+	fn load_state(&mut self, state: &ApuPulseState) {
+		self.register0.set_data(state.register0);
+		self.register1.set_data(state.register1);
+		self.register2.set_data(state.register2);
+		self.register3.set_data(state.register3);
+		self.enabled = state.enabled;
+		self.timer_counter = state.timer_counter;
+		self.timer_period = state.timer_period;
+		self.timer_sequence = state.timer_sequence;
+		self.envelope_start_flag = state.envelope_start_flag;
+		self.envelope_counter = state.envelope_counter;
+		self.envelope_decay_level_counter = state.envelope_decay_level_counter;
+		self.length_counter = state.length_counter;
+		self.sweep_reload_flag = state.sweep_reload_flag;
+		self.sweep_counter = state.sweep_counter;
+	}
 }
 
 /*
@@ -623,6 +695,7 @@ impl ApuTriangle {
 		}
 	}
 
+	#[inline(always)]
 	fn drive_timer(&mut self) {
 		if self.timer_counter > 0 {
 			self.timer_counter -= 1;
@@ -644,6 +717,7 @@ impl ApuTriangle {
 		}
 	}
 
+	#[inline]
 	fn drive_linear(&mut self) {
 		if self.linear_reload_flag {
 			self.linear_counter = self.linear_counter();
@@ -696,6 +770,32 @@ impl ApuTriangle {
 
 	fn timer(&self) -> u16 {
 		((self.timer_high() as u16) << 8) | self.timer_low() as u16
+	}
+
+	fn save_state(&self) -> ApuTriangleState {
+		ApuTriangleState {
+			register0: self.register0.get_data(),
+			register2: self.register2.get_data(),
+			register3: self.register3.get_data(),
+			enabled: self.enabled,
+			timer_counter: self.timer_counter,
+			timer_sequence: self.timer_sequence,
+			length_counter: self.length_counter,
+			linear_reload_flag: self.linear_reload_flag,
+			linear_counter: self.linear_counter,
+		}
+	}
+
+	fn load_state(&mut self, state: &ApuTriangleState) {
+		self.register0.set_data(state.register0);
+		self.register2.set_data(state.register2);
+		self.register3.set_data(state.register3);
+		self.enabled = state.enabled;
+		self.timer_counter = state.timer_counter;
+		self.timer_sequence = state.timer_sequence;
+		self.length_counter = state.length_counter;
+		self.linear_reload_flag = state.linear_reload_flag;
+		self.linear_counter = state.linear_counter;
 	}
 }
 
@@ -787,6 +887,7 @@ impl ApuNoise {
 	}
 
 
+	#[inline(always)]
 	fn drive_timer(&mut self) {
 		if self.timer_counter > 0 {
 			self.timer_counter -= 1;
@@ -803,6 +904,7 @@ impl ApuNoise {
 		}
 	}
 
+	#[inline]
 	fn drive_envelope(&mut self) {
 		if self.envelope_start_flag {
 			self.envelope_counter = self.envelope_period();
@@ -866,6 +968,36 @@ impl ApuNoise {
 
 	fn length_counter_index(&self) -> u8 {
 		self.register3.load_bits(3, 5)
+	}
+
+	fn save_state(&self) -> ApuNoiseState {
+		ApuNoiseState {
+			register0: self.register0.get_data(),
+			register2: self.register2.get_data(),
+			register3: self.register3.get_data(),
+			enabled: self.enabled,
+			timer_counter: self.timer_counter,
+			timer_period: self.timer_period,
+			envelope_start_flag: self.envelope_start_flag,
+			envelope_counter: self.envelope_counter,
+			envelope_decay_level_counter: self.envelope_decay_level_counter,
+			length_counter: self.length_counter,
+			shift_register: self.shift_register,
+		}
+	}
+
+	fn load_state(&mut self, state: &ApuNoiseState) {
+		self.register0.set_data(state.register0);
+		self.register2.set_data(state.register2);
+		self.register3.set_data(state.register3);
+		self.enabled = state.enabled;
+		self.timer_counter = state.timer_counter;
+		self.timer_period = state.timer_period;
+		self.envelope_start_flag = state.envelope_start_flag;
+		self.envelope_counter = state.envelope_counter;
+		self.envelope_decay_level_counter = state.envelope_decay_level_counter;
+		self.length_counter = state.length_counter;
+		self.shift_register = state.shift_register;
 	}
 }
 
@@ -1087,10 +1219,48 @@ impl ApuDmc {
 	fn sample_length(&self) -> u8 {
 		self.register3.load()
 	}
+
+	fn save_state(&self) -> ApuDmcState {
+		ApuDmcState {
+			register0: self.register0.get_data(),
+			register1: self.register1.get_data(),
+			register2: self.register2.get_data(),
+			register3: self.register3.get_data(),
+			enabled: self.enabled,
+			timer_period: self.timer_period,
+			timer_counter: self.timer_counter,
+			delta_counter: self.delta_counter,
+			address_counter: self.address_counter,
+			remaining_bytes_counter: self.remaining_bytes_counter,
+			sample_buffer: self.sample_buffer,
+			sample_buffer_is_empty: self.sample_buffer_is_empty,
+			shift_register: self.shift_register,
+			remaining_bits_counter: self.remaining_bits_counter,
+			silence_flag: self.silence_flag,
+		}
+	}
+
+	fn load_state(&mut self, state: &ApuDmcState) {
+		self.register0.set_data(state.register0);
+		self.register1.set_data(state.register1);
+		self.register2.set_data(state.register2);
+		self.register3.set_data(state.register3);
+		self.enabled = state.enabled;
+		self.timer_period = state.timer_period;
+		self.timer_counter = state.timer_counter;
+		self.delta_counter = state.delta_counter;
+		self.address_counter = state.address_counter;
+		self.remaining_bytes_counter = state.remaining_bytes_counter;
+		self.sample_buffer = state.sample_buffer;
+		self.sample_buffer_is_empty = state.sample_buffer_is_empty;
+		self.shift_register = state.shift_register;
+		self.remaining_bits_counter = state.remaining_bits_counter;
+		self.silence_flag = state.silence_flag;
+	}
 }
 
 struct ApuFrameRegister {
-	register: Register<u8>
+	pub register: Register<u8>
 }
 
 impl ApuFrameRegister {
