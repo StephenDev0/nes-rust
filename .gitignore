@@ -1,3 +1,4 @@
 Cargo.lock
 target/
 cli/SDL2.dll
+ios/.DS_Store
