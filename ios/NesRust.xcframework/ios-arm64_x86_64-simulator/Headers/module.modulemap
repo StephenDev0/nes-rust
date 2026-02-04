@@ -1,0 +1,4 @@
+module NesRust {
+    header "NesRustBridge.h"
+    export *
+}
